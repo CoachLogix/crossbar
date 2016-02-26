@@ -84,7 +84,17 @@ class PendingAuthAnonymous(PendingAuth):
             if error:
                 return error
 
-            d = self._authenticator_session.call(self._authenticator, self._realm, self._authid, self._session_details)
+            try:
+                transport = self._session_details['transport']
+            except (AttributeError, KeyError):
+                transport = {}
+
+            transport['request_data'] = details.request_data
+
+            d = self._authenticator_session.call(self._authenticator,
+                                                 self._realm,
+                                                 self._authid,
+                                                 self._session_details)
 
             def on_authenticate_ok(principal):
                 error = self._assign_principal(principal)

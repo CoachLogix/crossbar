@@ -316,7 +316,7 @@ class RouterSession(BaseSession):
         # the service session to be used eg for WAMP metaevents
         self._service_session = None
 
-    def onMessage(self, msg):
+    def onMessage(self, msg, **kwargs):
         """
         Implements :func:`autobahn.wamp.interfaces.ITransportHandler.onMessage`
         """
@@ -367,7 +367,8 @@ class RouterSession(BaseSession):
                                              authrole=msg.authrole,
                                              authextra=msg.authextra,
                                              session_roles=msg.roles,
-                                             pending_session=self._pending_session_id)
+                                             pending_session=self._pending_session_id,
+                                             request_data=msg.request_data)
 
                 d = txaio.as_future(self.onHello, msg.realm, details)
 
