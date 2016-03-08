@@ -526,9 +526,9 @@ class RouterWorkerSession(NativeWorkerSession):
         # wait until the uplink is ready
         try:
             uplink_session = yield extra['onready']
-        except Exception as e:
-            self.log.error(e)
-            raise e
+        except Exception:
+            self.log.failure(None)
+            raise
 
         self.realms[realm_id].uplinks[uplink_id].session = uplink_session
 
