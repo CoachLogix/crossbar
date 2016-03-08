@@ -523,7 +523,8 @@ def check_cookie_store_file(store):
     """
     check_dict_args({
         'type': (True, [six.text_type]),
-        'filename': (False, [six.text_type])
+        'filename': (False, [six.text_type]),
+        'purge_on_startup': (False, [bool])
     }, store, "WebSocket memory-backed cookie store configuration")
 
 
@@ -2797,12 +2798,14 @@ def upgrade_config_file(configfile):
     config = OrderedDict([(u'version', version)] + list(config.items()))
 
     with open(configfile, 'wb') as outfile:
-        data = json.dumps(config,
-                          skipkeys=False,
-                          sort_keys=False,
-                          ensure_ascii=False,
-                          separators=(',', ': '),
-                          indent=3)
+        data = json.dumps(
+            config,
+            skipkeys=False,
+            sort_keys=False,
+            ensure_ascii=False,
+            separators=(',', ': '),
+            indent=4,
+        )
         # ensure newline at end of file
         data += u'\n'
         outfile.write(data.encode('utf8'))
