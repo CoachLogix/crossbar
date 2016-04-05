@@ -30,12 +30,13 @@
 
 import os
 import json
+import datetime
 
 from six.moves import http_cookies
 
 from autobahn import util
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 __all__ = (
     'CookieStoreMemoryBacked',
@@ -299,6 +300,12 @@ class CookieStoreFileBacked(CookieStore):
     def _clean_cookie_file(self):
         with open(self._cookie_file_name, 'w') as cookie_file:
             for cbtid, cookie in self._cookies.items():
+                expiration_delta = datetime.timedelta(seconds=int(cookie['max_age']))
+                upper_limit = util.utcstr(datetime.datetime.now() - expiration_delta)
+                if cookie['created'] < upper_limit:
+                    # This cookie is expired, discard
+                    continue
+
                 cookie_record = json.dumps({
                     'id': cbtid,
                     'created': cookie['created'],
