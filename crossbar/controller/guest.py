@@ -36,7 +36,7 @@ from twisted.internet import protocol
 from twisted.internet.error import ProcessDone, ProcessTerminated, ProcessExitedAlready
 from twisted.internet.error import ConnectionDone
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 __all__ = ('create_guest_worker_client_factory',)
 
@@ -72,9 +72,6 @@ class GuestWorkerClientProtocol(protocol.Protocol):
                 if options['stdin']['type'] == 'json':
                     self.transport.write(json.dumps(options['stdin']['value'], ensure_ascii=False).encode('utf8'))
                     self.log.debug("GuestWorkerClientProtocol: JSON value written to stdin on guest")
-
-                elif options['stdin']['type'] == 'msgpack':
-                    raise Exception("not implemented")
 
                 else:
                     raise Exception("logic error")

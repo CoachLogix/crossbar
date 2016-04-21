@@ -32,14 +32,14 @@ from __future__ import absolute_import
 
 import json
 import binascii
+import six
 
 from collections import deque
-
-import six
 
 from twisted.web.resource import Resource, NoResource
 
 # Each of the following 2 trigger a reactor import at module level
+# See https://twistedmatrix.com/trac/ticket/8246 for fixing it
 from twisted.web import http
 from twisted.web.server import NOT_DONE_YET
 
@@ -50,7 +50,7 @@ from autobahn.wamp.websocket import parseSubprotocolIdentifier
 from autobahn.wamp.exception import SerializationError, \
     TransportLost
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 __all__ = (
     'WampLongPollResource',
@@ -543,11 +543,27 @@ class WampLongPollResource(Resource):
         if serializers is None:
             serializers = []
 
+            # try CBOR WAMP serializer
+            try:
+                from autobahn.wamp.serializer import CBORSerializer
+                serializers.append(CBORSerializer(batched=True))
+                serializers.append(CBORSerializer())
+            except ImportError:
+                pass
+
             # try MsgPack WAMP serializer
             try:
                 from autobahn.wamp.serializer import MsgPackSerializer
                 serializers.append(MsgPackSerializer(batched=True))
                 serializers.append(MsgPackSerializer())
+            except ImportError:
+                pass
+
+            # try UBJSON WAMP serializer
+            try:
+                from autobahn.wamp.serializer import UBJSONSerializer
+                serializers.append(UBJSONSerializer(batched=True))
+                serializers.append(UBJSONSerializer())
             except ImportError:
                 pass
 

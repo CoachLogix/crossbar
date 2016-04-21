@@ -31,11 +31,10 @@
 from __future__ import absolute_import
 
 import os
-import re
-import json
 import traceback
 import socket
 import getpass
+from collections import OrderedDict
 
 import twisted
 from twisted.internet.defer import inlineCallbacks, Deferred
@@ -55,7 +54,7 @@ from crossbar.controller.process import NodeControllerSession
 from crossbar.controller.management import NodeManagementBridgeSession
 from crossbar.controller.management import NodeManagementSession
 
-from crossbar._logging import make_logger
+from txaio import make_logger
 
 try:
     import nacl  # noqa
@@ -67,7 +66,76 @@ except ImportError:
 __all__ = ('Node',)
 
 
-def maybe_generate_key(log, cbdir, privkey_path=u'node.key'):
+def _parse_keyfile(key_path, private=True):
+    """
+    Internal helper. This parses a node.pub or node.priv file and
+    returns a dict mapping tags -> values.
+    """
+    if os.path.exists(key_path) and not os.path.isfile(key_path):
+        raise Exception("Key file '{}' exists, but isn't a file".format(key_path))
+
+    allowed_tags = [u'public-key-ed25519', u'machine-id', u'created-at',
+                    u'creator']
+    if private:
+        allowed_tags.append(u'private-key-ed25519')
+
+    tags = OrderedDict()
+    with open(key_path, 'r') as key_file:
+        got_blankline = False
+        for line in key_file.readlines():
+            if line.strip() == '':
+                got_blankline = True
+            elif got_blankline:
+                tag, value = line.split(':', 1)
+                tag = tag.strip().lower()
+                value = value.strip()
+                if tag not in allowed_tags:
+                    raise Exception("Invalid tag '{}' in key file {}".format(tag, key_path))
+                if tag in tags:
+                    raise Exception("Duplicate tag '{}' in key file {}".format(tag, key_path))
+                tags[tag] = value
+    return tags
+
+
+def _machine_id():
+    """
+    for informational purposes, try to get a machine unique id thing
+    """
+    try:
+        # why this? see: http://0pointer.de/blog/projects/ids.html
+        with open('/var/lib/dbus/machine-id', 'r') as f:
+            return f.read().strip()
+    except:
+        return None
+
+
+def _creator():
+    """
+    for informational purposes, try to identify the creator (user@hostname)
+    """
+    try:
+        return u'{}@{}'.format(getpass.getuser(), socket.gethostname())
+    except:
+        return None
+
+
+def _write_node_key(filepath, tags, msg):
+    """
+    Internal helper.
+    Write the given tags to the given file
+    """
+    with open(filepath, 'w') as f:
+        f.write(msg)
+        for (tag, value) in tags.items():
+            if value:
+                f.write(u'{}: {}\n'.format(tag, value))
+
+    # set file mode to read only for owner
+    # 384 (decimal) == 0600 (octal) - we use that for Py2/3 reasons
+    os.chmod(filepath, 384)
+
+
+def maybe_generate_key(log, cbdir, privkey_path=u'key.priv', pubkey_path=u'key.pub'):
     if not HAS_NACL:
         log.warn("Skipping node key generation - NaCl package not installed!")
         return
@@ -76,76 +144,74 @@ def maybe_generate_key(log, cbdir, privkey_path=u'node.key'):
     from nacl.encoding import HexEncoder
 
     privkey = None
+    pubkey = None
     privkey_path = os.path.join(cbdir, privkey_path)
+    pubkey_path = os.path.join(cbdir, pubkey_path)
 
     if os.path.exists(privkey_path):
         # node private key seems to exist already .. check!
-        if os.path.isfile(privkey_path):
-            with open(privkey_path, 'r') as privkey_file:
-                privkey = None
-                # parse key file lines, looking for tag "ed25519-privkey"
-                got_blankline = False
-                for line in privkey_file.read().splitlines():
-                    if line.strip() == '':
-                        got_blankline = True
-                    elif got_blankline:
-                        tag, value = line.split(':', 1)
-                        tag = tag.strip().lower()
-                        value = value.strip()
-                        if tag not in [u'private-key-ed25519', u'public-key-ed25519', u'machine-id', u'created-at', u'creator']:
-                            raise Exception("Invalid tag '{}' in node private key file {}".format(tag, privkey_path))
-                        if tag == u'private-key-ed25519':
-                            privkey = value
-                            break
+        tags = _parse_keyfile(privkey_path, private=True)
+        if u'private-key-ed25519' not in tags:
+            raise Exception("Node private key file lacks a 'private-key-ed25519' tag!")
 
-                if not privkey:
-                    raise Exception("Node private key file lacks a 'ed25519-privkey' tag!")
+        privkey = tags[u'private-key-ed25519']
+        # recreate a signing key from the base64 encoding
+        privkey_obj = SigningKey(privkey, encoder=HexEncoder)
+        pubkey = privkey_obj.verify_key.encode(encoder=HexEncoder).decode('ascii')
 
-                # recreate a signing key from the base64 encoding
-                privkey_obj = SigningKey(privkey, encoder=HexEncoder)
-                pubkey = privkey_obj.verify_key.encode(encoder=HexEncoder).decode('ascii')
+        # confirm we have the public key in the file, and that it is
+        # correct
+        if u'public-key-ed25519' in tags:
+            if tags[u'public-key-ed25519'] != pubkey:
+                raise Exception(
+                    ("Inconsistent key file '{}': 'public-key-ed25519' doesn't"
+                     " correspond to private-key-ed25519").format(privkey_path)
+                )
+        log.debug("Node key already exists (public key: {})".format(pubkey))
 
-            log.debug("Node key already exists (public key: {})".format(pubkey))
+        if os.path.exists(pubkey_path):
+            pubtags = _parse_keyfile(pubkey_path, private=False)
+            if u'public-key-ed25519' not in pubtags:
+                raise Exception(
+                    ("Pubkey file '{}' exists but lacks 'public-key-ed25519'"
+                     " tag").format(pubkey_path)
+                )
+            if pubtags[u'public-key-ed25519'] != pubkey:
+                raise Exception(
+                    ("Inconsistent key file '{}': 'public-key-ed25519' doesn't"
+                     " correspond to private-key-ed25519").format(pubkey_path)
+                )
         else:
-            raise Exception("Node private key path '{}' exists, but isn't a file".format(privkey_path))
+            log.info("'{}' not found; re-creating from '{}'".format(pubkey_path, privkey_path))
+            tags = OrderedDict([
+                (u'creator', _creator()),
+                (u'created-at', utcnow()),
+                (u'machine-id', _machine_id()),
+                (u'public-key-ed25519', pubkey),
+            ])
+            msg = u'Crossbar.io public key for node authentication\n\n'
+            _write_node_key(pubkey_path, tags, msg)
+
     else:
         # node private key does NOT yet exist: generate one
         privkey_obj = SigningKey.generate()
         privkey = privkey_obj.encode(encoder=HexEncoder).decode('ascii')
-        privkey_created_at = utcnow()
-
         pubkey = privkey_obj.verify_key.encode(encoder=HexEncoder).decode('ascii')
 
-        # for informational purposes, try to get a machine unique id thing ..
-        machine_id = None
-        try:
-            # why this? see: http://0pointer.de/blog/projects/ids.html
-            with open('/var/lib/dbus/machine-id', 'r') as f:
-                machine_id = f.read().strip()
-        except:
-            pass
+        # first, write the public file
+        tags = OrderedDict([
+            (u'creator', _creator()),
+            (u'created-at', utcnow()),
+            (u'machine-id', _machine_id()),
+            (u'public-key-ed25519', pubkey),
+        ])
+        msg = u'Crossbar.io public key for node authentication\n\n'
+        _write_node_key(pubkey_path, tags, msg)
 
-        # for informational purposes, try to identify the creator (user@hostname)
-        creator = None
-        try:
-            creator = u'{}@{}'.format(getpass.getuser(), socket.gethostname())
-        except:
-            pass
-
-        # write out the private key file
-        with open(privkey_path, 'w') as privkey_file:
-            privkey_file.write(u'Crossbar.io private key for node authentication - KEEP THIS SAFE!\n\n')
-            if creator:
-                privkey_file.write(u'creator: {}\n'.format(creator))
-            privkey_file.write(u'created-at: {}\n'.format(privkey_created_at))
-            if machine_id:
-                privkey_file.write(u'machine-id: {}\n'.format(machine_id))
-            privkey_file.write(u'public-key-ed25519: {}\n'.format(pubkey))
-            privkey_file.write(u'private-key-ed25519: {}\n'.format(privkey))
-
-        # set file mode to read only for owner
-        # 384 (decimal) == 0600 (octal) - we use that for Py2/3 reasons
-        os.chmod(privkey_path, 384)
+        # now, add the private key and write the private file
+        tags[u'private-key-ed25519'] = privkey
+        msg = u'Crossbar.io private key for node authentication - KEEP THIS SAFE!\n\n'
+        _write_node_key(privkey_path, tags, msg)
 
         log.info("New node key generated!")
 
@@ -198,6 +264,19 @@ class Node(object):
 
         # node shutdown triggers, one or more of checkconfig.NODE_SHUTDOWN_MODES
         self._node_shutdown_triggers = [checkconfig.NODE_SHUTDOWN_ON_WORKER_EXIT]
+
+        # map fro router worker IDs to
+        self._realm_templates = {}
+
+        # for node elements started under specific IDs, and where
+        # the node configuration does not specify an ID, use a generic
+        # name numbered sequentially using the counters here
+        self._worker_no = 1
+        self._realm_no = 1
+        self._role_no = 1
+        self._connection_no = 1
+        self._transport_no = 1
+        self._component_no = 1
 
     def load(self, configfile=None):
         """
@@ -358,9 +437,12 @@ class Node(object):
             if 'transport' in cdc_config:
                 transport = cdc_config['transport']
                 if 'tls' in transport['endpoint']:
-                    hostname = transport['endpoint']['tls']['hostname']
+                    if 'hostname' in transport['endpoint']:
+                        hostname = transport['endpoint']['tls']['hostname']
+                    else:
+                        raise Exception("TLS activated on CDC connection, but 'hostname' not provided")
                 else:
-                    raise Exception("TLS activated on CDC connection, but 'hostname' not provided")
+                    hostname = None
                 self.log.warn("CDC transport configuration overridden from node config!")
             else:
                 transport = {
@@ -413,7 +495,7 @@ class Node(object):
 
             runner = ApplicationRunner(
                 url=transport['url'], realm=realm, extra=extra,
-                ssl=optionsForClientTLS(hostname),
+                ssl=optionsForClientTLS(hostname) if hostname else None,
             )
 
             try:
@@ -518,58 +600,55 @@ class Node(object):
 
     @inlineCallbacks
     def _startup(self, config):
-        # fake call details information when calling into
-        # remoted procedure locally
-        #
+        """
+        Startup elements in the node as specified in the provided node configuration.
+        """
+        # call options we use to call into the local node management API
+        call_options = CallOptions()
+
+        # fake call details we use to call into the local node management API
         call_details = CallDetails(caller=0)
 
+        # get contoller configuration subpart
         controller = config.get('controller', {})
 
         # start Manhole in node controller
-        #
         if 'manhole' in controller:
             yield self._controller.start_manhole(controller['manhole'], details=call_details)
 
         # startup all workers
-        #
-        worker_no = 1
-
-        # FIXME: setup things so we disclose our identity!
-        call_options = CallOptions()
-
         for worker in config.get('workers', []):
-            # worker ID, type and logname
-            #
+
+            # worker ID
             if 'id' in worker:
                 worker_id = worker.pop('id')
             else:
-                worker_id = 'worker{}'.format(worker_no)
-                worker_no += 1
+                worker_id = 'worker-{:03d}'.format(self._worker_no)
+                self._worker_no += 1
 
+            # worker type - a type of working process from the following fixed list
             worker_type = worker['type']
-            worker_options = worker.get('options', {})
+            assert(worker_type in ['router', 'container', 'guest', 'websocket-testee'])
 
+            # set logname depending on worker type
             if worker_type == 'router':
                 worker_logname = "Router '{}'".format(worker_id)
-
             elif worker_type == 'container':
                 worker_logname = "Container '{}'".format(worker_id)
-
             elif worker_type == 'websocket-testee':
                 worker_logname = "WebSocketTestee '{}'".format(worker_id)
-
             elif worker_type == 'guest':
                 worker_logname = "Guest '{}'".format(worker_id)
-
             else:
                 raise Exception("logic error")
 
-            # router/container
-            #
+            # any worker specific options
+            worker_options = worker.get('options', {})
+
+            # native worker processes: router, container, websocket-testee
             if worker_type in ['router', 'container', 'websocket-testee']:
 
                 # start a new native worker process ..
-                #
                 if worker_type == 'router':
                     yield self._controller.start_router(worker_id, worker_options, details=call_details)
 
@@ -583,7 +662,6 @@ class Node(object):
                     raise Exception("logic error")
 
                 # setup native worker generic stuff
-                #
                 if 'pythonpath' in worker_options:
                     added_paths = yield self._controller.call('crossbar.node.{}.worker.{}.add_pythonpath'.format(self._node_id, worker_id), worker_options['pythonpath'], options=call_options)
                     self.log.debug("{worker}: PYTHONPATH extended for {paths}",
@@ -600,132 +678,83 @@ class Node(object):
                                    worker=worker_logname)
 
                 # setup router worker
-                #
                 if worker_type == 'router':
 
                     # start realms on router
-                    #
-                    realm_no = 1
-
                     for realm in worker.get('realms', []):
 
+                        # start realm
                         if 'id' in realm:
                             realm_id = realm.pop('id')
                         else:
-                            realm_id = 'realm{}'.format(realm_no)
-                            realm_no += 1
+                            realm_id = 'realm-{:03d}'.format(self._realm_no)
+                            self._realm_no += 1
 
-                        # extract schema information from WAMP-flavored Markdown
-                        #
-                        schemas = None
-                        if 'schemas' in realm:
-                            schemas = {}
-                            schema_pat = re.compile(r"```javascript(.*?)```", re.DOTALL)
-                            cnt_files = 0
-                            cnt_decls = 0
-                            for schema_file in realm.pop('schemas'):
-                                schema_file = os.path.join(self._cbdir, schema_file)
-                                self.log.info("{worker}: processing WAMP-flavored Markdown file {schema_file} for WAMP schema declarations",
-                                              worker=worker_logname, schema_file=schema_file)
-                                with open(schema_file, 'r') as f:
-                                    cnt_files += 1
-                                    for d in schema_pat.findall(f.read()):
-                                        try:
-                                            o = json.loads(d)
-                                            if isinstance(o, dict) and '$schema' in o and o['$schema'] == u'http://wamp.ws/schema#':
-                                                uri = o['uri']
-                                                if uri not in schemas:
-                                                    schemas[uri] = {}
-                                                schemas[uri].update(o)
-                                                cnt_decls += 1
-                                        except Exception:
-                                            self.log.failure("{worker}: WARNING - failed to process declaration in {schema_file} - {log_failure.value}",
-                                                             worker=worker_logname, schema_file=schema_file)
-                            self.log.info("{worker}: processed {cnt_files} files extracting {cnt_decls} schema declarations and {len_schemas} URIs",
-                                          worker=worker_logname, cnt_files=cnt_files, cnt_decls=cnt_decls, len_schemas=len(schemas))
-
-                        enable_trace = realm.get('trace', False)
-                        yield self._controller.call('crossbar.node.{}.worker.{}.start_router_realm'.format(self._node_id, worker_id), realm_id, realm, schemas, enable_trace=enable_trace, options=call_options)
+                        yield self._controller.call('crossbar.node.{}.worker.{}.start_router_realm'.format(self._node_id, worker_id), realm_id, realm, options=call_options)
                         self.log.info("{worker}: realm '{realm_id}' (named '{realm_name}') started",
-                                      worker=worker_logname, realm_id=realm_id, realm_name=realm['name'], enable_trace=enable_trace)
+                                      worker=worker_logname, realm_id=realm_id, realm_name=realm['name'])
 
                         # add roles to realm
-                        #
-                        role_no = 1
                         for role in realm.get('roles', []):
                             if 'id' in role:
                                 role_id = role.pop('id')
                             else:
-                                role_id = 'role{}'.format(role_no)
-                                role_no += 1
+                                role_id = 'role-{:03d}'.format(self._role_no)
+                                self._role_no += 1
 
                             yield self._controller.call('crossbar.node.{}.worker.{}.start_router_realm_role'.format(self._node_id, worker_id), realm_id, role_id, role, options=call_options)
                             self.log.info("{}: role '{}' (named '{}') started on realm '{}'".format(worker_logname, role_id, role['name'], realm_id))
 
                         # start uplinks for realm
-                        #
-                        uplink_no = 1
                         for uplink in realm.get('uplinks', []):
                             if 'id' in uplink:
                                 uplink_id = uplink.pop('id')
                             else:
-                                uplink_id = 'uplink{}'.format(uplink_no)
-                                uplink_no += 1
+                                uplink_id = 'uplink-{:03d}'.format(self._uplink_no)
+                                self._uplink_no += 1
 
                             yield self._controller.call('crossbar.node.{}.worker.{}.start_router_realm_uplink'.format(self._node_id, worker_id), realm_id, uplink_id, uplink, options=call_options)
                             self.log.info("{}: uplink '{}' started on realm '{}'".format(worker_logname, uplink_id, realm_id))
 
                     # start connections (such as PostgreSQL database connection pools)
                     # to run embedded in the router
-                    #
-                    connection_no = 1
-
                     for connection in worker.get('connections', []):
 
                         if 'id' in connection:
                             connection_id = connection.pop('id')
                         else:
-                            connection_id = 'connection{}'.format(connection_no)
-                            connection_no += 1
+                            connection_id = 'connection-{:03d}'.format(self._connection_no)
+                            self._connection_no += 1
 
                         yield self._controller.call('crossbar.node.{}.worker.{}.start_connection'.format(self._node_id, worker_id), connection_id, connection, options=call_options)
                         self.log.info("{}: connection '{}' started".format(worker_logname, connection_id))
 
                     # start components to run embedded in the router
-                    #
-                    component_no = 1
-
                     for component in worker.get('components', []):
 
                         if 'id' in component:
                             component_id = component.pop('id')
                         else:
-                            component_id = 'component{}'.format(component_no)
-                            component_no += 1
+                            component_id = 'component-{:03d}'.format(self._component_no)
+                            self._component_no += 1
 
                         yield self._controller.call('crossbar.node.{}.worker.{}.start_router_component'.format(self._node_id, worker_id), component_id, component, options=call_options)
                         self.log.info("{}: component '{}' started".format(worker_logname, component_id))
 
                     # start transports on router
-                    #
-                    transport_no = 1
-
                     for transport in worker['transports']:
 
                         if 'id' in transport:
                             transport_id = transport.pop('id')
                         else:
-                            transport_id = 'transport{}'.format(transport_no)
-                            transport_no += 1
+                            transport_id = 'transport-{:03d}'.format(self._transport_no)
+                            self._transport_no += 1
 
                         yield self._controller.call('crossbar.node.{}.worker.{}.start_router_transport'.format(self._node_id, worker_id), transport_id, transport, options=call_options)
                         self.log.info("{}: transport '{}' started".format(worker_logname, transport_id))
 
                 # setup container worker
-                #
                 elif worker_type == 'container':
-
-                    component_no = 1
 
                     # if components exit "very soon after" we try to
                     # start them, we consider that a failure and shut
@@ -747,15 +776,13 @@ class Node(object):
                     # start connections (such as PostgreSQL database connection pools)
                     # to run embedded in the container
                     #
-                    connection_no = 1
-
                     for connection in worker.get('connections', []):
 
                         if 'id' in connection:
                             connection_id = connection.pop('id')
                         else:
-                            connection_id = 'connection{}'.format(connection_no)
-                            connection_no += 1
+                            connection_id = 'connection-{:03d}'.format(self._connection_no)
+                            self._connection_no += 1
 
                         yield self._controller.call('crossbar.node.{}.worker.{}.start_connection'.format(self._node_id, worker_id), connection_id, connection, options=call_options)
                         self.log.info("{}: connection '{}' started".format(worker_logname, connection_id))
@@ -767,8 +794,8 @@ class Node(object):
                         if 'id' in component:
                             component_id = component.pop('id')
                         else:
-                            component_id = 'component{}'.format(component_no)
-                            component_no += 1
+                            component_id = 'component-{:03d}'.format(self._component_no)
+                            self._component_no += 1
 
                         yield self._controller.call('crossbar.node.{}.worker.{}.start_container_component'.format(self._node_id, worker_id), component_id, component, options=call_options)
                         self.log.info("{worker}: component '{component_id}' started",
@@ -778,14 +805,12 @@ class Node(object):
                     self._reactor.callLater(2, component_stop_sub.unsubscribe)
 
                 # setup websocket-testee worker
-                #
                 elif worker_type == 'websocket-testee':
 
-                    # start transports on router
-                    #
+                    # start transport on websocket-testee
                     transport = worker['transport']
-                    transport_no = 1
-                    transport_id = 'transport{}'.format(transport_no)
+                    transport_id = 'transport-{:03d}'.format(self._transport_no)
+                    self._transport_no = 1
 
                     yield self._controller.call('crossbar.node.{}.worker.{}.start_websocket_testee_transport'.format(self._node_id, worker_id), transport_id, transport, options=call_options)
                     self.log.info("{}: transport '{}' started".format(worker_logname, transport_id))
