@@ -150,7 +150,11 @@ def check_is_running(cbdir):
                 remove_PID_type = "corrupt"
                 remove_PID_reason = "corrupt .pid file"
             else:
-                if sys.platform == 'win32' and not _HAS_PSUTIL:
+                if pid == os.getpid():
+                    # the process ID is our own -- this happens often when the Docker container is
+                    # shut down uncleanly
+                    return None
+                elif sys.platform == 'win32' and not _HAS_PSUTIL:
                     # when on Windows, and we can't actually determine if the PID exists,
                     # just assume it exists
                     return pid_data
@@ -267,6 +271,14 @@ def run_command_version(options, reactor=None, **kwargs):
     except ImportError:
         cbor_ver = '-'
 
+    # UBJSON Serializer
+    try:
+        import ubjson  # noqa
+        ubjson_ver = 'ubjson-%s' % pkg_resources.require('py-ubjson')[0].version
+        supported_serializers.append('UBJSON')
+    except ImportError:
+        ubjson_ver = '-'
+
     # LMDB
     try:
         import lmdb  # noqa
@@ -294,6 +306,7 @@ def run_command_version(options, reactor=None, **kwargs):
     log.debug("     JSON Codec     : {ver}", ver=decorate(json_ver))
     log.debug("     MsgPack Codec  : {ver}", ver=decorate(msgpack_ver))
     log.debug("     CBOR Codec     : {ver}", ver=decorate(cbor_ver))
+    log.debug("     UBJSON Codec   : {ver}", ver=decorate(ubjson_ver))
     log.info("   Twisted          : {ver}", ver=decorate(tx_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(tx_loc))
     log.info("   LMDB             : {ver}", ver=decorate(lmdb_ver))
@@ -648,30 +661,29 @@ def run_command_check(options, **kwargs):
     from crossbar.common.checkconfig import check_config_file, color_json
     configfile = os.path.join(options.cbdir, options.config)
 
-    print("\nChecking node configuration file '{}':\n".format(configfile))
-
-    if False:
-        with open(configfile, 'rb') as f:
-            print(color_json(f.read().decode('utf8')))
+    verbose = False
 
     try:
+        print("Checking local node configuration file: {}".format(configfile))
         config = check_config_file(configfile)
     except Exception as e:
-        print("\nError: {}\n".format(e))
+        print("Error: {}".format(e))
         sys.exit(1)
     else:
-        print("Ok, node configuration looks good!\n")
+        print("Ok, node configuration looks good!")
 
-        import json
-        config_content = json.dumps(
-            config,
-            skipkeys=False,
-            sort_keys=False,
-            ensure_ascii=False,
-            separators=(',', ': '),
-            indent=4,
-        )
-        print(color_json(config_content))
+        if verbose:
+            import json
+            config_content = json.dumps(
+                config,
+                skipkeys=False,
+                sort_keys=False,
+                ensure_ascii=False,
+                separators=(',', ': '),
+                indent=4,
+            )
+            print(color_json(config_content))
+
         sys.exit(0)
 
 
@@ -944,6 +956,11 @@ def run(prog=None, args=None, reactor=None):
             else:
                 options.cbdir = '.'
         options.cbdir = os.path.abspath(options.cbdir)
+
+        # convenience: if --cbdir points to a config file, take
+        # the config file's base dirname as node directory
+        if os.path.isfile(options.cbdir):
+            options.cbdir = os.path.dirname(options.cbdir)
 
     # Crossbar.io node configuration file
     #

@@ -163,6 +163,10 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
     """
     log = make_logger()
 
+    def __init__(self):
+        super(WampWebSocketServerProtocol, self).__init__()
+        self._cbtid = None
+
     def onConnect(self, request):
 
         if self.factory.debug_traffic:
@@ -278,7 +282,9 @@ class WampWebSocketServerProtocol(websocket.WampWebSocketServerProtocol):
         except Exception:
             self.log.failure("Error rendering WebSocket status page template: {log_failure.value}")
 
-    def onDisconnect(self):
+    def onClose(self, wasClean, code, reason):
+        super(WampWebSocketServerProtocol, self).onClose(wasClean, code, reason)
+
         # remove this WebSocket connection from the set of connections
         # associated with the same cookie
         if self._cbtid:
@@ -322,6 +328,7 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 # try CBOR WAMP serializer
                 try:
                     from autobahn.wamp.serializer import CBORSerializer
+                    serializers.append(CBORSerializer(batched=True))
                     serializers.append(CBORSerializer())
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-CBOR serializer")
@@ -332,16 +339,29 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory):
                 # try MsgPack WAMP serializer
                 try:
                     from autobahn.wamp.serializer import MsgPackSerializer
+                    serializers.append(MsgPackSerializer(batched=True))
                     serializers.append(MsgPackSerializer())
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-MsgPack serializer")
                 else:
                     sers.discard('msgpack')
 
+            if 'ubjson' in sers:
+                # try UBJSON WAMP serializer
+                try:
+                    from autobahn.wamp.serializer import UBJSONSerializer
+                    serializers.append(UBJSONSerializer(batched=True))
+                    serializers.append(UBJSONSerializer())
+                except ImportError:
+                    self.log.warn("Warning: could not load WAMP-UBJSON serializer")
+                else:
+                    sers.discard('ubjson')
+
             if 'json' in sers:
                 # try JSON WAMP serializer
                 try:
                     from autobahn.wamp.serializer import JsonSerializer
+                    serializers.append(JsonSerializer(batched=True))
                     serializers.append(JsonSerializer())
                 except ImportError:
                     self.log.warn("Warning: could not load WAMP-JSON serializer")

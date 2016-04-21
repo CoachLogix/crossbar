@@ -23,19 +23,64 @@ clean:
 	# Learn to love the shell! http://unix.stackexchange.com/a/115869/52500
 	find . \( -name "*__pycache__" -type d \) -prune -exec rm -rf {} +
 
+freeze:
+	pip freeze -r requirements-in.txt | grep -v crossbar | grep -v hashin > requirements.txt
+
+hashin:
+	hashin click
+	hashin setuptools
+	hashin zope.interface
+	hashin Twisted
+	hashin autobahn
+	hashin netaddr
+	hashin PyTrie
+	hashin Jinja2
+	hashin mistune
+	hashin Pygments
+	hashin PyYAML
+	hashin shutilwhich
+	hashin sdnotify
+	hashin psutil
+	hashin lmdb
+	hashin msgpack-python
+	hashin cbor
+	hashin py-ubjson
+	hashin cryptography
+	hashin pyOpenSSL
+	hashin pyasn1
+	hashin pyasn1-modules
+	hashin service-identity
+	hashin PyNaCl
+	hashin treq
+	hashin setproctitle
+	hashin watchdog
+	hashin argh
+	hashin attrs
+	hashin cffi
+	hashin enum34
+	hashin idna
+	hashin ipaddress
+	hashin MarkupSafe
+	hashin pathtools
+	hashin pycparser
+	hashin requests
+	hashin six
+	hashin txaio
+
+wheel:
+	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip wheel --require-hashes --wheel-dir ./wheels -r requirements.txt
+
 install:
-	pip install --upgrade -e .[all]
+	#LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip install --upgrade -e .
+	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip install --ignore-installed --require-hashes -r requirements.txt
 
 install3:
-	pip3 install --upgrade -e .[all]
+	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip3 install --upgrade -e .
 
+# publish to PyPI
 publish: clean
-	python setup.py register
-	python setup.py sdist upload
-	# we can't ship wheels: while CB itself doesn't have binary extensions,
-	# we do dynamic deps ..
-	# see: https://github.com/crossbario/crossbar/issues/525
-	#python setup.py bdist_wheel upload
+	python setup.py sdist bdist_wheel
+	twine upload dist/*
 
 test: flake8
 	trial crossbar
